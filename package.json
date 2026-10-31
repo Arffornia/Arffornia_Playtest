@@ -1,0 +1,22 @@
+{
+  "name": "arffornia-playtest",
+  "version": "0.1.0",
+  "description": "One command to test an Arffornia pull request in game: playtest guide|up|down|report",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "playtest": "kit/playtest.mjs"
+  },
+  "files": [
+    "kit/",
+    "agent/",
+    "docs/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arffornia/Arffornia_Playtest.git"
+  }
+}

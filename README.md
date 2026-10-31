@@ -10,10 +10,37 @@ Everything between "an agent opened a PR" and "Brian says it works in game":
   (`tools.json`), Claude drives it with `PLAYTESTER.md`, scripted scenarios (`scenarios/`) replay
   passing runs for free.
 
+## Install the `playtest` command
+
+`playtest` is a command-line tool (Node 20+, no dependencies). It calls `gh` (logged in) and `git`,
+and Java 21 for local environments. Pick one way:
+
 ```sh
-node kit/playtest.mjs guide Arffornia/Arffornia_Mods#50
-node kit/playtest.mjs up Arffornia/Arffornia_Mods#50 --dry-run
+# Nix (NixOS, or any machine with flakes): run it once, or install it in your profile
+nix run github:Arffornia/Arffornia_Playtest -- up Arffornia/Arffornia_Mods#50
+nix profile install github:Arffornia/Arffornia_Playtest
+
+# npm (any OS): installs the `playtest` command globally from this repo
+npm install -g github:Arffornia/Arffornia_Playtest
+
+# or straight from a clone, no install
+node kit/playtest.mjs up Arffornia/Arffornia_Mods#50
 ```
+
+On NixOS you can also add it to your system: take `packages.<system>.playtest` from this flake as
+an input of your configuration.
+
+## Use it
+
+```sh
+playtest guide  Arffornia/Arffornia_Mods#50            # what changed, what to test, what to watch
+playtest up     Arffornia/Arffornia_Mods#50            # start server + game for that PR (light env)
+playtest up     Arffornia/Arffornia_Mods#50 --dry-run  # print the steps only
+playtest down                                          # stop it (one environment at a time)
+playtest report Arffornia/Arffornia_Mods#50 --verdict ok --post
+```
+
+A PR URL works too (`playtest up https://github.com/Arffornia/Arffornia_Mods/pull/50`).
 
 Specs: [kit](docs/kit-spec.md), [agent](docs/agent-spec.md). Tech watch: card 02, "Agents that play
 the feature".

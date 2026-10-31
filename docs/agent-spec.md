@@ -65,7 +65,7 @@ PR labelled `playtest`
 - Full pack: the single preview slot on the homelab when it is up (one at a time); nightly at most.
 
 ## Decisions for Brian (defaults in bold)
-- **A1 Repo**: **`Arffornia/arffornia-playtest`** (probe mod + runner + PR playtest kit; reused by
+- **A1 Repo** (decided 2026-10-31): **`Arffornia/Arffornia_Playtest`**, public, created by Brian (org naming convention `Arffornia/Arffornia_<Name>`), (probe mod + runner + PR playtest kit; reused by
   the mod and the pack) / inside `Arffornia_Mods` as a subproject.
 - **A2 Probe base**: **write our own on NeoForge, copying MCPFabric's tool design** (MIT, credit) /
   port MCPFabric itself / start from computer use only.

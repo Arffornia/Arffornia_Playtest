@@ -47,7 +47,7 @@ the spec's acceptance criteria, and the guide picks it up.
   self-hosted runner or Argo CD pull (ADR-0007 revised to one leased slot).
 
 ## Decisions for Brian (defaults in bold)
-- **K1 Where the kit lives**: **`Arffornia/arffornia-playtest`** with the agent / agent-kit skill / docs repo.
+- **K1 Where the kit lives** (decided 2026-10-31): **`Arffornia/Arffornia_Playtest`**, public, created by Brian (org naming convention `Arffornia/Arffornia_<Name>`), with the agent / agent-kit skill / docs repo.
 - **K2 Default target**: **local** (homelab off is fine) / the preview slot.
 - **K3 Preview slot policy**: **one slot, leased, last request waits** / last request replaces.
 - **K4 Guide posting**: **automatic when the PR enters "awaiting Brian"** / on `/guide` comment only.

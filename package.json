@@ -1,0 +1,26 @@
+{
+  "name": "arffornia-playtest",
+  "version": "0.2.0",
+  "description": "Test an Arffornia pull request from a link: playtest up|status|extend|down|checklist|card|guide|report",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "playtest": "kit/playtest.mjs"
+  },
+  "files": [
+    "kit/",
+    "checklists/",
+    "agent/",
+    "docs/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs envfiles/test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arffornia/Arffornia_Playtest.git"
+  }
+}

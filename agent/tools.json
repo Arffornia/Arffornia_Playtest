@@ -1,0 +1,31 @@
+{
+  "$comment": "MCP tools exposed by the Arffornia playtest probe (a dev/test-only NeoForge client+server mod). Transport: streamable HTTP on 127.0.0.1:25599, bearer token from config/arffornia-playtest.toml. Never shipped in the player pack. Shapes follow MCP tool definitions (name, description, inputSchema).",
+  "tools": [
+    { "name": "observe", "description": "One call per step: a screenshot (PNG, downscaled to max_width) plus the structured state the agent should trust over pixels: player (pos, rot, health, hunger, gamemode, selected slot), open screen (class, title, widgets with id/label/bounds/enabled/focused: the accessibility tree), crosshair target (block id + pos + face, or entity), chat since last call, log lines at WARN+ since last call, game tick.",
+      "inputSchema": { "type": "object", "properties": { "max_width": { "type": "integer", "default": 1024 }, "screenshot": { "type": "boolean", "default": true }, "radius": { "type": "integer", "default": 8, "description": "include block entities from our mods within this radius" } } } },
+    { "name": "block", "description": "Block state, block entity NBT (filtered to public fields) and, for Arffornia machines, the machine state (recipe, progress 0..1, energy, input/output slots, formed/not formed).",
+      "inputSchema": { "type": "object", "required": ["pos"], "properties": { "pos": { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 } } } },
+    { "name": "click_widget", "description": "Activate a widget of the open screen by id from observe (semantic click: robust to GUI scale and resolution).",
+      "inputSchema": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" }, "button": { "enum": ["left", "right"], "default": "left" }, "shift": { "type": "boolean" } } } },
+    { "name": "slot", "description": "Click a container slot (inventory, machine GUI) by index, like a player: pickup, place, quick-move (shift), split (right).",
+      "inputSchema": { "type": "object", "required": ["index"], "properties": { "index": { "type": "integer" }, "action": { "enum": ["pickup", "quick_move", "split", "throw"], "default": "pickup" } } } },
+    { "name": "input", "description": "Raw input as a fallback: press/hold/release a key mapping (by name: key.forward, key.use, key.inventory...) or move/click the mouse in screen coordinates. Holding is bounded by ticks.",
+      "inputSchema": { "type": "object", "properties": { "key": { "type": "string" }, "action": { "enum": ["press", "hold", "release"], "default": "press" }, "ticks": { "type": "integer", "default": 1 }, "mouse": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "button": { "enum": ["left", "right", "none"] } } }, "text": { "type": "string", "description": "type text into the focused field" } } } },
+    { "name": "look", "description": "Turn the camera to face a block position or an entity id (no mouse-look guessing).",
+      "inputSchema": { "type": "object", "properties": { "pos": { "type": "array", "items": { "type": "number" } }, "entity": { "type": "integer" } } } },
+    { "name": "goto", "description": "Walk to a position with Baritone if installed (proves reachability), else teleport (test worlds only). Returns when arrived, stuck, or after max_ticks.",
+      "inputSchema": { "type": "object", "required": ["pos"], "properties": { "pos": { "type": "array", "items": { "type": "number" } }, "mode": { "enum": ["walk", "teleport"], "default": "walk" }, "max_ticks": { "type": "integer", "default": 600 } } } },
+    { "name": "use", "description": "Use the held item / interact with the block or entity under the crosshair (right click), or attack/break (left). Optionally select a hotbar slot first.",
+      "inputSchema": { "type": "object", "properties": { "action": { "enum": ["use", "attack", "break"], "default": "use" }, "hotbar": { "type": "integer" }, "ticks": { "type": "integer", "default": 1 } } } },
+    { "name": "command", "description": "Run a server command as an operator. Test worlds only: the probe refuses when the server is not a test/preview server. Use for setup (give, setblock, fill, place structure), never to fake the behaviour under test.",
+      "inputSchema": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" } } } },
+    { "name": "time", "description": "Deterministic time control with the vanilla /tick command: freeze, step N ticks, or run until a predicate holds (evaluated server-side each tick) or max_ticks.",
+      "inputSchema": { "type": "object", "properties": { "freeze": { "type": "boolean" }, "step": { "type": "integer" }, "until": { "type": "string", "description": "predicate DSL, e.g. machine(10,64,3).progress >= 1 or inventory.count('arffornia:iron_plate') >= 4" }, "max_ticks": { "type": "integer", "default": 1200 } } } },
+    { "name": "scenario", "description": "Test-world control: reset to a named template (a GameTest structure + seed + gamerules: no daylight cycle, no weather, no mob spawning), mark a log position, start/stop recording (frames saved for the report video).",
+      "inputSchema": { "type": "object", "properties": { "reset": { "type": "string" }, "mark": { "type": "string" }, "record": { "enum": ["start", "stop"] } } } },
+    { "name": "assert", "description": "Record a check in the run report (does not stop the run). Kinds: block, machine, inventory, chat, no_errors_since(mark), screenshot_matches(baseline, tolerance). Returns pass/fail + evidence.",
+      "inputSchema": { "type": "object", "required": ["kind", "expect"], "properties": { "kind": { "type": "string" }, "expect": {}, "label": { "type": "string" } } } },
+    { "name": "coverage", "description": "Which of the PR's changed methods ran since the scenario started (JaCoCo agent on the client and server JVMs, filtered to the diff). Tells the agent what it has NOT exercised yet.",
+      "inputSchema": { "type": "object", "properties": { "diff": { "type": "string", "description": "base..head, default from the run" } } } }
+  ]
+}

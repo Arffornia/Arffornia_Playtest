@@ -1,0 +1,4 @@
+[api]
+	baseUrl = "https://arffornia.com/api"
+[database]
+	host = "postgres-cluster.postgres.svc.cluster.local"

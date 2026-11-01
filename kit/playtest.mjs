@@ -1,213 +1,293 @@
 #!/usr/bin/env node
-// Arffornia PR playtest kit: one command to test a pull request in game, with a generated guide.
+// Arffornia playtest: test a pull request from a link, on fixed and capped cluster slots.
 //
-//   playtest guide  <owner/repo#n>              write the test guide (what changed, what to test, what to watch, decisions)
-//   playtest up     <owner/repo#n> [--light|--full] [--local|--slot] [--dry-run]
-//                                               start server + game for that PR (local by default)
-//   playtest down                               stop the running environment (only one runs at a time)
-//   playtest report <owner/repo#n> [--verdict ok|ko] [--notes "..."] [--decision D1=a ...] [--post]
-//                                               turn your findings into a review-stack answer (+ PR comment)
+//   playtest up <pr...> [--slot pr2] [--ttl 24h] [--via-pr] [--no-wait] [--no-open] [--force] [--dry-run]
+//        take a slot for these PRs (website: pr1-pr3.arffornia.com; pack: test.arffornia.com:25566),
+//        wait until it answers, print the URL and the 10-minute checklist
+//   playtest up <pr> --local [--light|--full] [--dry-run]   the same on this machine (cluster off)
+//   playtest status [--json] [--no-probe]                 slots, who holds them, expiry, health
+//   playtest extend <slot> [24h]                          push the expiry back (7 days at most)
+//   playtest down <slot|pr> [--via-pr] | down --local    free a slot, or stop the local environment
+//   playtest checklist <pr...>                            the checklist rows for these PRs
+//   playtest card [--session A,B] [--out file] [--offline] the review-stack Playtest card (JSON)
+//   playtest guide <pr> [--out file]                     the generated test guide for one PR
+//   playtest report <pr> --verdict ok|ko [--notes "..."] [--post]   your verdict, review-stack format
 //
-// No dependencies: Node 20+, the GitHub CLI (`gh`, REST only), git, Java 21 for local envs.
-// Resource rule (Brian, 2026-10-31): one full-pack environment at a time (~50 GB RAM); light
-// single-mod environments are cheap. The lock file enforces "one at a time".
-import { execFileSync, spawn } from 'node:child_process';
+// Needs Node 20+ and the GitHub CLI (`gh`, logged in, REST only). `--local` also needs git, Java 21
+// or Docker. A PR is <owner>/<repo>#<n> or its URL.
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { SLOTS, PLAYTEST_REPO, ENVS_BRANCH, kindOf, parseRef, parseDuration, buildEnv, validateEnv, pickSlot, extendEnv, serializeEnv, DEFAULT_TTL_MS } from './lib/slots.mjs';
+import { makeGh, makeStore } from './lib/github.mjs';
+import * as health from './lib/health.mjs';
+import { checklistText, buildCard, loadSessions } from './lib/card.mjs';
+import { guide, loadPR, MARK_REPORT } from './lib/guide.mjs';
+import { HOME, upLocal, downLocal } from './lib/local.mjs';
 
-const HOME = process.env.ARF_PLAYTEST_HOME || path.join(os.homedir(), '.arffornia-playtest');
-const LOCK = path.join(HOME, 'env.lock.json');
-const WT = process.env.ARF_WORKTREES || '/root/arffornia/wt';
-const MARK_AGENT = '<!-- arffornia-playtest-agent -->';
-const MARK_GUIDE = '<!-- arffornia-playtest-guide -->';
-const MARK_REPORT = '<!-- arffornia-playtest-report -->';
+export class UsageError extends Error {}
+const fail = (m) => { throw new UsageError(m); };
 
-const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-const gh = (p) => JSON.parse(sh('gh', ['api', p]));
-const ghAll = (p) => JSON.parse(sh('gh', ['api', '--paginate', '--slurp', p])).flat();
-const die = (m) => { console.error(`playtest: ${m}`); process.exit(1); };
-
-function parseRef(ref) {
-  const m = /^([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(ref || '') || /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(ref || '');
-  if (!m) die(`expected owner/repo#number or a PR URL, got "${ref}"`);
-  return { owner: m[1], repo: m[2], n: Number(m[3]), slug: `${m[1]}/${m[2]}` };
-}
-
-// ------------------------------------------------------------------ PR facts
-function loadPR(r) {
-  const pr = gh(`repos/${r.slug}/pulls/${r.n}`);
-  const files = ghAll(`repos/${r.slug}/pulls/${r.n}/files?per_page=100`);
-  const comments = ghAll(`repos/${r.slug}/issues/${r.n}/comments?per_page=100`);
-  let checks = [];
-  try { checks = gh(`repos/${r.slug}/commits/${pr.head.sha}/check-runs?per_page=100`).check_runs; } catch { /* no checks */ }
-  return { pr, files, comments, checks };
-}
-
-// Markdown sections of the PR body, by heading text (lowercase).
-function sections(body = '') {
-  const out = {}; let cur = '_';
-  for (const line of body.split('\n')) {
-    const h = /^#{1,4}\s+(.*)$/.exec(line);
-    if (h) { cur = h[1].trim().toLowerCase(); out[cur] = []; continue; }
-    (out[cur] ||= []).push(line);
+const FLAGS = ['local', 'light', 'full', 'dry-run', 'via-pr', 'no-wait', 'no-open', 'force', 'json', 'no-probe', 'post', 'offline'];
+export function parseArgs(argv) {
+  const pos = []; const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    const m = /^--([\w-]+)(?:=(.*))?$/.exec(argv[i]);
+    if (!m) { pos.push(argv[i]); continue; }
+    if (m[2] !== undefined) { opts[m[1]] = m[2]; continue; }
+    const nx = argv[i + 1];
+    if (!FLAGS.includes(m[1]) && nx !== undefined && !nx.startsWith('--')) { opts[m[1]] = opts[m[1]] ? [].concat(opts[m[1]], nx) : nx; i++; } else opts[m[1]] = true;
   }
-  return out;
+  return { pos, opts };
 }
-const pick = (secs, ...keys) => Object.entries(secs).filter(([k]) => keys.some((x) => k.includes(x))).flatMap(([, v]) => v).join('\n').trim();
 
-// What a changed path means for a human tester (Arffornia repos). First match wins per file.
-const AREAS = [
-  [/\/gametest\/|src\/test\/|\.test\.|__tests__|\/tests?\//, 'tests', 'Automated tests only: nothing to see in game for these files.'],
-  [/network|packet|payload/i, 'network', 'Client/server sync: test with the server and a client, watch for desync (values that differ between what you see and what happens), and reconnect once.'],
-  [/(blockentity|block_entity|machine|multiblock)/i, 'machines', 'Machines: place one, power it, feed it, break it and place it again; check it survives a chunk unload (fly away 200 blocks and back) and a server restart.'],
-  [/\/lang\/|i18n|translat/i, 'translations', 'Text: switch the game language between English and French; look for raw keys (like arffornia.foo.bar) or truncated text.'],
-  [/\/recipes?\/|recipe/i, 'recipes', 'Recipes: look them up in JEI/EMI, craft each one once.'],
-  [/worldgen|biome|feature|structure/i, 'worldgen', 'World generation: needs a NEW world; changes only apply to new chunks.'],
-  [/\/(gui|screen|client)\//i, 'ui', 'Screens: open them at GUI scale 2 and 4 and at a small window size; check keyboard navigation and hover texts.'],
-  [/config/i, 'config', 'Config: check the defaults on a fresh instance, and which side (server or client) a value lives on.'],
-  [/\/(models?|textures?|blockstates)\//i, 'assets', 'Models and textures: look at the block from all sides, in the inventory, in hand, at night.'],
-  [/(api|http|web|client\/api)/i, 'api', 'Website API: the website must be reachable; check behaviour when it is down (no crash, clear message).'],
-  [/\.github\/|gradle|build\.gradle|package(-lock)?\.json|\.nix/i, 'build', 'Build and CI only: no in-game test needed unless the game fails to start.'],
-];
-function classify(files) {
-  const by = new Map();
-  for (const f of files) {
-    const a = AREAS.find(([re]) => re.test(f.filename)) || [null, 'other', 'Other changes: skim the diff for anything visible in game.'];
-    if (!by.has(a[1])) by.set(a[1], { area: a[1], tip: a[2], files: [] });
-    by.get(a[1]).files.push(`${f.filename} (+${f.additions}/-${f.deletions})`);
+const heldEnvs = (files) => Object.fromEntries(Object.entries(files).map(([s, f]) => [s, f.env]));
+
+const span = (ms) => {
+  const h = Math.round(Math.abs(ms) / 3600e3);
+  return h >= 1 ? `${h} h` : `${Math.max(1, Math.round(Math.abs(ms) / 60e3))} min`;
+};
+
+// ------------------------------------------------------------------ up
+async function up(refs, opts, ctx) {
+  const { gh, store, log } = ctx;
+  if (!refs.length) fail('playtest up needs at least one PR (owner/repo#n)');
+  const prs = refs.map(parseRef);
+  if (opts.local) {
+    if (prs.length > 1) fail('--local takes one PR');
+    return upLocal(prs[0], opts, log);
   }
-  return [...by.values()];
-}
+  const kinds = [...new Set(prs.map((p) => kindOf(p.slug)))];
+  if (kinds.includes(null)) fail(`no slot serves ${prs.filter((p) => !kindOf(p.slug)).map((p) => p.slug).join(', ')}. Try --local, or "playtest guide".`);
+  if (kinds.length > 1) fail('these PRs need different kinds of slot: run playtest up once per kind');
+  const kind = kinds[0];
 
-// Environment sizing (Brian's rule): the mod repo alone is light; the pack is full.
-function envFor(r, pr) {
-  const labels = pr.labels.map((l) => l.name);
-  if (labels.includes('needs-full-pack') || /Provisioning|minecraft-server-charts|infra/i.test(r.repo)) return 'full';
-  if (/Arffornia_Mods|Nexus_Mods/i.test(r.repo)) return 'light';
-  if (/Launcher|Nexus_/i.test(r.repo)) return 'launcher';
-  if (/Website|keycloak/i.test(r.repo)) return 'web';
-  return 'none';
-}
-
-function guide(r, data) {
-  const { pr, files, comments, checks } = data;
-  const secs = sections(pr.body || '');
-  const env = envFor(r, pr);
-  const areas = classify(files).filter((a) => a.area !== 'tests');
-  const howTo = pick(secs, 'how to test', 'test plan', 'testing', 'to test');
-  const decisions = [...new Set([pick(secs, 'decision'), ...((pr.body || '').split('\n').filter((l) => /needs[- ]decision|\bD\d+\b.*:/i.test(l)))].join('\n').split('\n').map((s) => s.trim()).filter(Boolean))];
-  const agent = comments.filter((c) => c.body.includes(MARK_AGENT)).pop();
-  const failing = checks.filter((c) => c.conclusion && !['success', 'skipped', 'neutral'].includes(c.conclusion));
-  const pending = checks.filter((c) => c.status !== 'completed');
-  const risk = areas.some((a) => ['network', 'machines', 'worldgen'].includes(a.area)) ? 'high' : areas.some((a) => ['ui', 'recipes', 'config', 'api'].includes(a.area)) ? 'medium' : 'low';
-  const start = { light: `playtest up ${r.slug}#${r.n}            # light env: this mod + its dependencies, local, ~4 GB RAM`,
-    full: `playtest up ${r.slug}#${r.n} --full     # full pack (330 mods): local or the cluster preview slot, ~12-16 GB per server, one at a time`,
-    launcher: `playtest up ${r.slug}#${r.n}            # builds and opens this launcher branch`,
-    web: `playtest up ${r.slug}#${r.n}            # website preview (if the repo has one), otherwise the PR's own instructions`,
-    none: `(nothing to start: review the diff)` }[env];
-  const L = [];
-  L.push(MARK_GUIDE, `# Playtest guide: ${pr.title}`, '');
-  L.push(`[${r.slug}#${r.n}](${pr.html_url}) at \`${pr.head.sha.slice(0, 7)}\`, environment **${env}**, risk **${risk}**.`, '');
-  L.push('## Start', '', '```sh', start, '```', '');
-  if (failing.length || pending.length) L.push(`> CI: ${failing.length} failing, ${pending.length} still running (${[...failing, ...pending].map((c) => c.name).join(', ')}). Testing now may waste your time.`, '');
-  L.push('## What changed', '');
-  const summary = pick(secs, 'summary', 'what', 'why', '_').split('\n').filter((l) => l.trim() && !l.startsWith('<!--') && !l.startsWith('>')).slice(0, 6).map((l) => (l.length > 260 ? `${l.slice(0, 257)}...` : l));
-  if (summary.length) L.push(...summary, '');
-  for (const a of areas) L.push(`- **${a.area}**: ${a.files.length} file(s), e.g. ${a.files.slice(0, 3).map((f) => `\`${f}\``).join(', ')}`);
-  L.push('', '## What the agents already checked', '');
-  if (agent) L.push(agent.body.replace(MARK_AGENT, '').trim(), '');
-  else L.push('No in-game agent report on this PR yet. The agent playtest runs before this guide when the PR has the `playtest` label.', '');
-  L.push('## What to test', '');
-  if (howTo) L.push(howTo, '');
-  for (const a of areas.filter((x) => x.area !== 'build')) L.push(`- [ ] ${a.tip}`);
-  L.push('- [ ] The game starts, you can join, and nothing in the log says ERROR from `arffornia`.', '');
-  L.push('## What to watch', '');
-  L.push('- Frame rate and TPS while the feature runs (F3; `/neoforge tps`).');
-  if (areas.some((a) => a.area === 'network')) L.push('- Desync: what the client shows versus what the server does (reconnect once).');
-  if (areas.some((a) => a.area === 'machines')) L.push('- A machine across a chunk border, and after a restart.');
-  L.push('- Anything that looks unfinished: missing texture (pink/black), raw translation keys, English text in French.', '');
-  L.push('## Decisions to report', '');
-  if (decisions.length) L.push(...decisions.map((d) => (d.startsWith('-') ? d : `- ${d}`)), '');
-  else L.push('- None listed in the PR. If something felt wrong or you would do it differently, say it in the notes.', '');
-  L.push('## Report back', '', '```sh', `playtest report ${r.slug}#${r.n} --verdict ok --notes "..." --post     # or --verdict ko`, '```',
-    'This posts your verdict on the PR and writes it in the review-stack answer format, so the agents pick it up.', '');
-  return L.join('\n');
-}
-
-// ------------------------------------------------------------------ environments
-const readLock = () => { try { return JSON.parse(fs.readFileSync(LOCK, 'utf8')); } catch { return null; } };
-function plan(r, pr, kind, where) {
-  const wt = path.join(WT, `playtest-${r.repo}-${r.n}`);
-  const steps = [];
-  steps.push(['git', ['-C', `/root/arffornia/${r.repo}`, 'fetch', 'origin', `pull/${r.n}/head:playtest/${r.n}`]]);
-  steps.push(['git', ['-C', `/root/arffornia/${r.repo}`, 'worktree', 'add', '--force', wt, `playtest/${r.n}`]]);
-  if (kind === 'light') {
-    // NeoForge dev run: a dedicated server and a client that joins it (Quick Play, 1.20+).
-    steps.push(['sh', ['-c', `cd ${wt} && ./gradlew --offline runServer --args=nogui`], { background: 'server', wait: /Done \(/ }]);
-    steps.push(['sh', ['-c', `cd ${wt} && ./gradlew --offline runClient --args="--quickPlayMultiplayer localhost:25565 --username Brian"`], { background: 'client' }]);
-  } else if (kind === 'full' && where === 'local') {
-    // The pack from Provisioning at this PR, plus the server image used in production.
-    steps.push(['sh', ['-c', `docker run -d --name arf-playtest -p 25565:25565 -e EULA=TRUE -e TYPE=NEOFORGE -e VERSION=1.21.1 -e NEOFORGE_VERSION=21.1.172 -e MEMORY=12G -v ${wt}/dist:/data ghcr.io/itzg/minecraft-server:java21`]]);
-    steps.push(['echo', ['Launch the Arffornia launcher with the preview profile (launcher feature: "Preview a PR"), or a vanilla NeoForge 21.1.172 instance with the pack.']]);
-  } else if (kind === 'full' && where === 'slot') {
-    // The single cluster preview slot (ADR-0007, revised: one slot, leased): deploy this PR's bundle there.
-    steps.push(['gh', ['workflow', 'run', 'preview-slot.yml', '-R', 'TheGostsniperfr/infra', '-f', `pr=${r.slug}#${r.n}`, '-f', `sha=${pr.head.sha}`]]);
-    steps.push(['echo', [`Join preview.arffornia.example (mc-router hostname) once the workflow reports "ready".`]]);
-  } else steps.push(['echo', [`No game environment for this repo; open ${pr.html_url}`]]);
-  return { wt, steps };
-}
-
-async function up(r, opts) {
-  const lock = readLock();
-  const { pr } = { pr: gh(`repos/${r.slug}/pulls/${r.n}`) };
-  const kind = opts.full ? 'full' : opts.light ? 'light' : envFor(r, pr);
-  const where = opts.slot ? 'slot' : 'local';
-  if (lock && !opts['dry-run']) die(`an environment is already running (${lock.pr}, ${lock.kind}). Run "playtest down" first: one environment at a time.`);
-  const p = plan(r, pr, kind, where);
-  const guideText = guide(r, loadPR(r));
-  fs.mkdirSync(HOME, { recursive: true });
-  const gpath = path.join(HOME, `guide-${r.repo}-${r.n}.md`); fs.writeFileSync(gpath, guideText);
-  console.log(`environment: ${kind} (${where}); guide: ${gpath}`);
-  for (const [cmd, args, o] of p.steps) console.log(`  $ ${cmd} ${args.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(' ')}${o?.background ? '   &' : ''}`);
-  if (opts['dry-run']) return;
-  const pids = [];
-  for (const [cmd, args, o] of p.steps) {
-    if (!o?.background) { execFileSync(cmd, args, { stdio: 'inherit' }); continue; }
-    const log = path.join(HOME, `${o.background}.log`); const out = fs.openSync(log, 'w');
-    const c = spawn(cmd, args, { detached: true, stdio: ['ignore', out, out] }); c.unref(); pids.push(c.pid);
-    if (o.wait) { process.stdout.write(`waiting for ${o.background}`); while (!o.wait.test(fs.readFileSync(log, 'utf8'))) { await new Promise((s) => setTimeout(s, 2000)); process.stdout.write('.'); } console.log(' ready'); }
+  // Facts about each PR: open, from this repository (never a fork), CI state on the head.
+  const problems = [];
+  for (const p of prs) {
+    const pr = gh.pr(p);
+    p.head = pr.head.sha;
+    p.title = pr.title;
+    if (!pr.head.repo || pr.head.repo.full_name !== pr.base.repo.full_name) fail(`${p.ref} comes from a fork: fork code is never deployed on the cluster. Use --local.`);
+    if (pr.state !== 'open') problems.push(`${p.ref} is ${pr.merged_at ? 'merged' : 'closed'}`);
+    const checks = gh.checks(p.slug, p.head);
+    const bad = checks.filter((c) => c.status === 'completed' && !['success', 'skipped', 'neutral'].includes(c.conclusion));
+    const pending = checks.filter((c) => c.status !== 'completed');
+    if (bad.length) problems.push(`${p.ref}: CI failed on ${p.head.slice(0, 7)} (${bad.map((c) => c.name).join(', ')})`);
+    if (pending.length) problems.push(`${p.ref}: CI still running on ${p.head.slice(0, 7)} (${pending.map((c) => c.name).join(', ')})`);
+    if (!checks.length) log(`note: ${p.ref} has no check runs on ${p.head.slice(0, 7)}`);
   }
-  fs.writeFileSync(LOCK, JSON.stringify({ pr: `${r.slug}#${r.n}`, kind, where, wt: p.wt, pids, at: new Date().toISOString() }, null, 1));
-  console.log(`up. Follow the guide: ${gpath}`);
+
+  if (kind === 'launcher') {
+    log('Launcher PRs have no slot: test the beta build of the PR on this machine.');
+    for (const p of prs) log(`  gh run download --repo ${p.slug} --name launcher-pr-${p.n} --dir ~/Downloads/launcher-pr-${p.n}`);
+    log('Install it next to the normal launcher ("Arffornia Launcher Beta"). Checklist:');
+    log(checklistText(prs.map((p) => p.ref)));
+    return { kind };
+  }
+  if (kind === 'website' && prs.length !== 1) fail('a website slot takes one PR: run playtest up once per PR (pr1-pr3)');
+
+  // What the environment pulls must exist: the website images, the mod jar.
+  for (const p of prs) {
+    if (kind === 'website') {
+      const tag = `pr-${p.n}-${p.head.slice(0, 7)}`;
+      for (const image of ['arffornia/arffornia_website', 'arffornia/nginx_arffornia_website']) {
+        const r = await ctx.health.imageExists(image, tag);
+        if (r.ok === false) problems.push(`${r.detail} yet (the "Preview images" workflow builds it on each push)`);
+        if (r.ok === null) log(`note: could not check ${image}:${tag}: ${r.detail}`);
+      }
+    } else if (/arffornia_mods$/i.test(p.slug)) {
+      const rel = gh.release(p.slug, `pr-${p.n}`);
+      if (!rel || !(rel.assets || []).some((a) => a.name === 'arffornia.jar')) problems.push(`${p.ref}: no pre-release pr-${p.n} with arffornia.jar yet (the "Pre-release jars" workflow publishes it)`);
+    }
+  }
+  if (problems.length && !opts.force) fail(`not deploying:\n  - ${problems.join('\n  - ')}\nFix it or wait, or pass --force.`);
+  problems.forEach((m) => log(`warning (--force): ${m}`));
+
+  const wait = !opts['no-wait'] && !opts['dry-run'];
+  if (wait) {
+    const c = await ctx.health.clusterUp();
+    if (!c.ok) {
+      fail(`the cluster looks off (${c.detail}). Run it on this machine instead:\n  playtest up ${prs[0].ref} --local\nor prepare the slot for later with --no-wait (Argo CD deploys it when the cluster is back).`);
+    }
+  }
+
+  const files = store.list();
+  const slot = pickSlot({ kind, asked: opts.slot, held: heldEnvs(files), prs, now: ctx.now() });
+  const ttlMs = opts.ttl ? parseDuration(opts.ttl) : DEFAULT_TTL_MS;
+  const env = buildEnv({ slot, prs, requestedBy: ctx.login(), now: ctx.now(), ttlMs });
+  const errs = validateEnv(`envs/${slot}.yaml`, env, ctx.now());
+  if (errs.length) fail(`refusing to write an invalid env file:\n  - ${errs.join('\n  - ')}`);
+
+  if (opts['dry-run']) {
+    log(`would write envs/${slot}.yaml on ${PLAYTEST_REPO}@${ENVS_BRANCH}${files[slot] ? ` (replacing ${files[slot].env?.prsText || 'an unreadable file'})` : ''}:`);
+    log(serializeEnv(env));
+    return { slot, env, dryRun: true };
+  }
+  const short = prs.map((p) => `${p.repo}#${p.n}@${p.head.slice(0, 7)}`).join(' + ');
+  const res = store.put(slot, env, files[slot]?.sha || null, `playtest: up ${slot} = ${short}`, { viaPr: !!opts['via-pr'] });
+  if (res.pr) {
+    log(`opened ${res.pr}: merge it (merge commit) to deploy ${slot}.`);
+    return { slot, env, pr: res.pr };
+  }
+  log(`${slot} = ${env.prsText}, until ${env.expires} (playtest extend ${slot} 24h for more).`);
+
+  const where = SLOTS[slot].kind === 'website' ? SLOTS[slot].url : `Beta launcher, Settings, Environment: Test slot (server ${SLOTS[slot].server})`;
+  if (wait) {
+    const timeoutMs = opts.timeout ? parseDuration(opts.timeout) : (kind === 'pack' ? 25 : 10) * 60e3;
+    log(`waiting for ${slot} (up to ${span(timeoutMs)}; Argo CD polls the envs branch every 3 min)...`);
+    let last = '';
+    const r = await health.waitFor(() => ctx.health.slotUp(slot, env), {
+      timeoutMs,
+      everyMs: ctx.pollMs ?? 15000,
+      onTick: (t) => { if (t.detail !== last) { log(`  ${t.detail}`); last = t.detail; } },
+    });
+    if (!r.ok) log(`${slot} is not answering yet (${r.detail}). Check again with: playtest status`);
+  }
+  log(`\nOpen: ${where}\n\nChecklist (about 10 minutes):\n${checklistText(prs.map((p) => p.ref))}\n`);
+  log(`Then answer OK or KO on the Playtest card, or: playtest report ${prs[0].ref} --verdict ok|ko --notes "..." --post`);
+  if (wait && !opts['no-open'] && SLOTS[slot].kind === 'website') ctx.open(SLOTS[slot].url);
+  return { slot, env };
 }
 
-function down() {
-  const lock = readLock(); if (!lock) return console.log('nothing running');
-  for (const pid of lock.pids || []) { try { process.kill(-pid); } catch { try { process.kill(pid); } catch { /* gone */ } } }
-  if (lock.kind === 'full' && lock.where === 'local') { try { sh('docker', ['rm', '-f', 'arf-playtest']); } catch { /* not running */ } }
-  fs.rmSync(LOCK); console.log(`stopped ${lock.pr}. The worktree stays at ${lock.wt} (git worktree remove it when done).`);
+// ------------------------------------------------------------------ status, extend, down
+async function status(opts, ctx) {
+  const files = ctx.store.list();
+  const rows = [];
+  for (const slot of Object.keys(SLOTS)) {
+    const f = files[slot];
+    const env = f?.env;
+    const row = { slot, kind: SLOTS[slot].kind, url: SLOTS[slot].kind === 'website' ? SLOTS[slot].url : SLOTS[slot].server };
+    if (f && !env) row.error = f.error;
+    if (env) {
+      const left = Date.parse(env.expires) - ctx.now();
+      Object.assign(row, { prs: env.prsText, by: env.requestedBy, expires: env.expires, left: left > 0 ? `${span(left)} left` : `EXPIRED ${span(left)} ago` });
+    } else if (slot === 'slot') row.prs = 'main + edge (staging default)';
+    if (!opts['no-probe'] && (env || slot === 'slot')) row.health = (await ctx.health.slotUp(slot, env || { provisioningRef: 'refs/heads/main', modTag: 'edge' })).detail;
+    rows.push(row);
+  }
+  if (opts.json) { ctx.log(JSON.stringify(rows, null, 2)); return rows; }
+  for (const r of rows) {
+    ctx.log(`${r.slot.padEnd(5)} ${(r.prs || 'free').padEnd(44)} ${(r.by || '').padEnd(16)} ${(r.left || '').padEnd(16)} ${r.url}${r.health ? `  [${r.health}]` : ''}${r.error ? `  (unreadable: ${r.error})` : ''}`);
+  }
+  return rows;
 }
 
-function report(r, opts) {
+function slotOf(arg, files) {
+  if (SLOTS[arg]) return arg;
+  const r = parseRef(arg);
+  const s = Object.keys(files).find((k) => files[k].env && [].concat(files[k].env.prs).includes(r.ref));
+  if (!s) fail(`no slot holds ${r.ref}`);
+  return s;
+}
+
+function extend(pos, opts, ctx) {
+  const [arg, dur = '24h'] = pos;
+  if (!arg) fail('playtest extend <slot> [24h]');
+  const files = ctx.store.list();
+  const slot = slotOf(arg, files);
+  const f = files[slot];
+  if (!f?.env) fail(`${slot} is free`);
+  const env = extendEnv(f.env, parseDuration(dur), ctx.now());
+  const res = ctx.store.put(slot, env, f.sha, `playtest: extend ${slot} to ${env.expires}`, { viaPr: !!opts['via-pr'] });
+  ctx.log(res.pr ? `opened ${res.pr}: merge it to extend ${slot}.` : `${slot} (${env.prsText}) now expires ${env.expires}.`);
+  return env;
+}
+
+function down(pos, opts, ctx) {
+  if (opts.local) return downLocal(ctx.log);
+  const [arg] = pos;
+  if (!arg) fail('playtest down <slot|pr>, or playtest down --local');
+  const files = ctx.store.list();
+  const slot = slotOf(arg, files);
+  const f = files[slot];
+  if (!f) { ctx.log(`${slot} is already free.`); return null; }
+  const res = ctx.store.remove(slot, f.sha, `playtest: down ${slot} (${f.env?.prsText || 'unreadable file'})`, { viaPr: !!opts['via-pr'] });
+  ctx.log(res.pr ? `opened ${res.pr}: merge it to free ${slot}.` : `${slot} is free. Argo CD removes the environment within a few minutes.`);
+  return slot;
+}
+
+// ------------------------------------------------------------------ report (review-stack answer)
+function report(r, opts, ctx) {
   const verdict = opts.verdict || 'ok';
+  if (!['ok', 'ko'].includes(verdict)) fail('--verdict is ok or ko');
   const decisions = Object.fromEntries([].concat(opts.decision || []).map((d) => d.split('=')).map(([k, v]) => [k, { choice: v }]));
-  const answer = { at: new Date().toISOString(), source: 'playtest', pr: `${r.slug}#${r.n}`, verdict: verdict === 'ok' ? 'approve' : 'changes', decisions, notes: opts.notes || '' };
+  const answer = { at: new Date(ctx.now()).toISOString(), source: 'playtest', pr: r.ref, verdict: verdict === 'ok' ? 'approve' : 'changes', decisions, notes: opts.notes || '' };
   fs.mkdirSync(HOME, { recursive: true });
-  const f = path.join(HOME, `answer-${r.repo}-${r.n}.json`); fs.writeFileSync(f, JSON.stringify(answer, null, 2));
+  const f = path.join(HOME, `answer-${r.repo}-${r.n}.json`);
+  fs.writeFileSync(f, JSON.stringify(answer, null, 2));
   const body = [MARK_REPORT, `**Playtest by the maintainer: ${verdict === 'ok' ? 'works' : 'does not work yet'}**`, '', answer.notes || '_no notes_', '',
     Object.keys(decisions).length ? `Decisions: ${Object.entries(decisions).map(([k, v]) => `${k} = ${v.choice}`).join(', ')}` : '', '',
     '<details><summary>review-stack answer</summary>', '', '```json', JSON.stringify(answer, null, 2), '```', '</details>'].join('\n');
-  if (opts.post) { sh('gh', ['api', `repos/${r.slug}/issues/${r.n}/comments`, '-f', `body=${body}`]); console.log(`posted on ${r.slug}#${r.n}`); }
-  else console.log(body);
-  console.log(`answer: ${f}`);
+  if (opts.post) { ctx.gh.api('POST', `repos/${r.slug}/issues/${r.n}/comments`, { body }); ctx.log(`posted on ${r.ref}`); } else ctx.log(body);
+  ctx.log(`answer: ${f}`);
+  return answer;
 }
 
 // ------------------------------------------------------------------ cli
-const [cmd, ref, ...rest] = process.argv.slice(2);
-const opts = {}; for (let i = 0; i < rest.length; i++) { const m = /^--([\w-]+)$/.exec(rest[i]); if (!m) continue; const nx = rest[i + 1]; if (nx && !nx.startsWith('--')) { opts[m[1]] = opts[m[1]] ? [].concat(opts[m[1]], nx) : nx; i++; } else opts[m[1]] = true; }
-if (cmd === 'guide') { const r = parseRef(ref); const g = guide(r, loadPR(r)); if (opts.out) fs.writeFileSync(opts.out, g); else console.log(g); }
-else if (cmd === 'up') await up(parseRef(ref), opts);
-else if (cmd === 'down') down();
-else if (cmd === 'report') report(parseRef(ref), opts);
-else { console.log(fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 12).map((l) => l.replace(/^\/\/ ?/, '')).join('\n')); process.exit(cmd ? 1 : 0); }
+function openUrl(url) {
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
+  const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
+  try { spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref(); } catch { /* no browser: the URL is printed */ }
+}
+
+export function defaultCtx() {
+  const gh = makeGh();
+  let login;
+  return {
+    gh,
+    store: makeStore(gh),
+    health,
+    now: () => Date.now(),
+    log: (...a) => console.log(...a),
+    open: openUrl,
+    login: () => (login ||= gh.login()),
+  };
+}
+
+export async function run(argv, ctx = defaultCtx()) {
+  const [cmd, ...rest] = argv;
+  const { pos, opts } = parseArgs(rest);
+  switch (cmd) {
+    case 'up': return up(pos, opts, ctx);
+    case 'status': return status(opts, ctx);
+    case 'extend': return extend(pos, opts, ctx);
+    case 'down': return down(pos, opts, ctx);
+    case 'checklist': ctx.log(checklistText(pos.map((p) => parseRef(p).ref))); return null;
+    case 'card': {
+      const only = opts.session ? String(opts.session).split(',') : null;
+      let held = {};
+      const titles = {};
+      if (!opts.offline) {
+        held = heldEnvs(ctx.store.list());
+        for (const s of loadSessions()) for (const r of s.rows) { try { titles[r.pr] = ctx.gh.pr(parseRef(r.pr)).title; } catch { /* keep the checklist title */ } }
+      }
+      const card = buildCard({ only, held, titles });
+      const out = JSON.stringify(card, null, 2);
+      if (opts.out) fs.writeFileSync(opts.out, `${out}\n`); else ctx.log(out);
+      return card;
+    }
+    case 'guide': {
+      const r = parseRef(pos[0]);
+      const g = guide(r, loadPR(r));
+      if (opts.out) fs.writeFileSync(opts.out, g); else ctx.log(g);
+      return g;
+    }
+    case 'report': return report(parseRef(pos[0]), opts, ctx);
+    default: {
+      const help = fs.readFileSync(new URL(import.meta.url), 'utf8').split('\n').slice(1, 17).map((l) => l.replace(/^\/\/ ?/, '')).join('\n');
+      ctx.log(help);
+      if (cmd && !['help', '--help', '-h'].includes(cmd)) throw new UsageError(`unknown command "${cmd}"`);
+      return null;
+    }
+  }
+}
+
+const self = new URL(import.meta.url).pathname;
+const isMain = process.argv[1] && fs.existsSync(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(self);
+if (isMain) {
+  run(process.argv.slice(2)).catch((e) => {
+    console.error(`playtest: ${e.message}`);
+    process.exit(e instanceof UsageError ? 2 : 1);
+  });
+}

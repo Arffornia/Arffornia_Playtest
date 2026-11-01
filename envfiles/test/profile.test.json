@@ -1,0 +1,13 @@
+{
+  "mods": [{ "owner": "Arffornia", "repoName": "Arffornia_Mods" }],
+  "files": [
+    {
+      "kinds": ["server"],
+      "path": "config/arffornia-common.toml",
+      "replace": [
+        { "from": "https://arffornia.com/api", "to": "http://staging.test/api" },
+        { "from": "postgres-cluster.postgres.svc.cluster.local", "to": "staging-postgres.arffornia-staging.svc.cluster.local" }
+      ]
+    }
+  ]
+}

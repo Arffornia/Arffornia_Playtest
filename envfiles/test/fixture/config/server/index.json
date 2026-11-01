@@ -1,7 +1,0 @@
-{
-  "generatedAt": "2026-11-01T00:00:00.000Z",
-  "files": [
-    { "path": "config/arffornia-common.toml", "hash": "0a8e423d68807991347159b289b95f87ab899f69", "override": true },
-    { "path": "config/other.toml", "hash": "c654a5435f170cfad37e136fee9672ecc40afd4a", "override": true }
-  ]
-}

@@ -1,9 +1,0 @@
-{
-    "mods": {
-        "modrinth": [{ "displayName": "Sodium", "id": "AANobbMI", "versionId": "abc" }],
-        "github-releases": [
-            { "displayName": "Other", "owner": "Someone", "repoName": "Other_Mod", "tag": "latest", "assetName": "other.jar" },
-            { "displayName": "Arffornia Mod", "owner": "Arffornia", "repoName": "Arffornia_Mods", "tag": "latest", "assetName": "arffornia.jar" }
-        ]
-    }
-}

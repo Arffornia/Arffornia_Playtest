@@ -72,15 +72,19 @@ Launcher PRs have no slot: `playtest up` prints where to download their beta art
 ### Agents and concurrent writes
 
 The slot files live on the **`envs` branch** of this repo, never on `main`. Every write is a
-normal commit through the contents API. There is no force-push, and no history rewrite:
+normal commit, checked against the blob SHA read before. There is no force-push and no history
+rewrite, so a slot that someone else changed in between is refused, never overwritten:
 
-- creating a slot file sends no blob SHA, so it fails if someone created it first;
-- updating or deleting sends the SHA it read, so it fails if someone changed it in between.
+- **contents API** (default): a create sends no SHA and an update or delete sends the one it
+  read; GitHub refuses a stale one (409/422);
+- **git** (fallback, or `ARF_PLAYTEST_WRITE=git`): a small clone in `~/.arffornia-playtest`
+  rebuilds the commit on the fetched `envs` head after the same SHA check, and pushes it without
+  force, so the server refuses anything but a fast-forward. Agent sandboxes that allow git pushes
+  but not REST writes use this path automatically.
 
-Either way `playtest` says "changed while this command ran" and nothing is overwritten. With
-`--via-pr`, the same change goes on a new `playtest/<slot>-<time>` branch with a PR into
-`envs` instead; merging it (merge commit) applies it. Use it where committing to a shared branch
-is not allowed.
+Either way `playtest` says "changed while this command ran". With `--via-pr`, the same change
+goes on a new `playtest/<slot>-<time>` branch with a PR into `envs` instead; merging it (merge
+commit) applies it. Use it where committing to a shared branch is not allowed.
 
 The file format is fixed by `kit/lib/slots.mjs` (`validateEnv`): known slots and kinds, allowed
 repositories, full SHAs, a safe character set, and at most 7 days ahead. The CLI refuses to

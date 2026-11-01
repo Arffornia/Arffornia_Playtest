@@ -317,3 +317,48 @@ test('the card has one OK/KO row per checklist PR, sessions A to D', () => {
   assert.ok(card.links.every((l) => l.url.startsWith('https://')));
   assert.equal(buildCard({ only: ['D'] }).decisions.length, 3);
 });
+
+// ------------------------------------------------------------------ git writer (no REST writes)
+test('the git writer pushes fast-forward only and refuses a stale slot', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { makeGitWriter } = await import('../kit/lib/github.mjs');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pt-git-'));
+  const g = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const bare = path.join(tmp, 'origin.git');
+  g(tmp, 'init', '-q', '--bare', '-b', 'envs', bare);
+  const seed = path.join(tmp, 'seed');
+  g(tmp, 'init', '-q', '-b', 'envs', seed);
+  fs.mkdirSync(path.join(seed, 'envs'));
+  fs.writeFileSync(path.join(seed, 'envs/README.md'), 'x\n');
+  g(seed, 'add', '.'); g(seed, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init'); g(seed, 'push', '-q', bare, 'envs');
+  const a = makeGitWriter({ url: bare, dir: path.join(tmp, 'a'), login: () => 'alice' });
+  const b = makeGitWriter({ url: bare, dir: path.join(tmp, 'b'), login: () => 'bob' });
+  a.write('envs/pr1.yaml', 'slot: "pr1"\n', null, 'up pr1');
+  assert.throws(() => b.write('envs/pr1.yaml', 'slot: "pr1"\n#b\n', null, 'b also creates pr1'), /stale/);
+  const blob = g(bare, 'rev-parse', 'envs:envs/pr1.yaml');
+  b.write('envs/pr2.yaml', 'slot: "pr2"\n', null, 'up pr2');           // other slot: fine
+  a.write('envs/pr1.yaml', 'slot: "pr1"\n#2\n', blob, 'extend pr1');     // a is behind on envs: rebuilt and pushed
+  assert.throws(() => b.write('envs/pr1.yaml', null, blob, 'down with the old blob'), /stale/);
+  b.write('envs/pr1.yaml', null, g(bare, 'rev-parse', 'envs:envs/pr1.yaml'), 'down pr1');
+  assert.deepEqual(g(bare, 'ls-tree', '--name-only', 'envs', 'envs/').split('\n').sort(), ['envs/README.md', 'envs/pr2.yaml']);
+  assert.equal(g(bare, 'log', '--format=%an', '-1', 'envs'), 'bob');
+  assert.equal(g(bare, 'rev-list', '--count', 'envs'), '5');
+});
+
+test('auto mode falls back to git when the API refuses writes', () => {
+  const fake = fakeGitHub();
+  const deny = (method, p, body) => {
+    if (method !== 'GET') throw new GhError('Write access to this GitHub API path is not permitted through this proxy. (HTTP 403)', 403);
+    return fake.transport(method, p, body);
+  };
+  const writes = [];
+  const store = makeStore(makeGh(deny), { git: { write: (...a) => { writes.push(a); return { commit: { sha: 'g1' } }; } } });
+  const env = buildEnv({ slot: 'pr1', prs: [{ ...parseRef(`${W}#1`), head: sha('1') }], requestedBy: 'a', now: NOW });
+  assert.deepEqual(store.put('pr1', env, null, 'up'), { commit: { sha: 'g1' } });
+  assert.equal(writes[0][0], 'envs/pr1.yaml');
+  assert.equal(writes[0][4], 'envs');
+  assert.throws(() => makeStore(makeGh(deny), { writer: 'api' }).put('pr1', env, null, 'up'), /not permitted/);
+});

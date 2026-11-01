@@ -135,7 +135,7 @@ answers in its place:
 
 `npm test` covers the rewrites; `envfiles/test/smoke.sh` builds the image and runs it against a
 fake raw GitHub (needs Docker). The image is published on every `main` push as
-`ghcr.io/arffornia/playtest-envfiles:sha-<7>`.
+`ghcr.io/arffornia/playtest-envfiles:tree-<12>`, where `<12>` starts the git tree hash of `envfiles/`. The tag depends only on the files, so infra can pin it before the image exists.
 
 ## Rules
 

@@ -1,5 +1,9 @@
 # Publishes the pack-files image (envfiles/) as ghcr.io/arffornia/playtest-envfiles.
-# Tags: sha-<7> (immutable, what infra pins, with its digest) and main (moving).
+# Tags:
+#   tree-<12>  the git tree hash of envfiles/: content-addressed, known before the merge, and
+#              what TheGostsniperfr/infra pins (the same files always give the same tag);
+#   sha-<7>    the commit that published it;
+#   main       moving, for humans.
 name: pack-files image
 
 on:
@@ -40,7 +44,9 @@ jobs:
 
       - name: Tags
         id: tags
-        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse HEAD:envfiles | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         id: push
@@ -49,6 +55,7 @@ jobs:
           context: envfiles
           push: true
           tags: |
+            ghcr.io/arffornia/playtest-envfiles:tree-${{ steps.tags.outputs.tree }}
             ghcr.io/arffornia/playtest-envfiles:sha-${{ steps.tags.outputs.short }}
             ghcr.io/arffornia/playtest-envfiles:main
           labels: |
@@ -60,10 +67,10 @@ jobs:
       - name: Summary
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
-          SHORT: ${{ steps.tags.outputs.short }}
+          TREE: ${{ steps.tags.outputs.tree }}
         run: |
           {
-            echo "Published \`ghcr.io/arffornia/playtest-envfiles:sha-${SHORT}@${DIGEST}\`."
+            echo "Published \`ghcr.io/arffornia/playtest-envfiles:tree-${TREE}@${DIGEST}\`."
             echo
-            echo "Pin it in TheGostsniperfr/infra (k8s/config/arffornia/staging and slot)."
+            echo "TheGostsniperfr/infra pins tree-${TREE} (k8s/config/arffornia/playtest/pack-files)."
           } >> "$GITHUB_STEP_SUMMARY"

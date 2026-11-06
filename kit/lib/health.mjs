@@ -11,9 +11,11 @@ async function get(url, { timeoutMs = 8000, method = 'GET', headers = {} } = {})
   }
 }
 
+// The cluster is up when the gateway answers at all. A 5xx only means the staging app is down,
+// which must not send a PR to --local while the slots work.
 export async function clusterUp() {
   const r = await get(STAGING_URL, { timeoutMs: 6000 });
-  return { ok: r.status > 0 && r.status < 500, detail: r.status ? `staging answered ${r.status}` : `staging unreachable (${r.text})` };
+  return { ok: r.status > 0, detail: r.status ? `gateway answered (staging HTTP ${r.status})` : `gateway unreachable (${r.text})` };
 }
 
 // A website slot is up when `/` answers 2xx or 3xx.

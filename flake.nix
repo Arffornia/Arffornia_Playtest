@@ -1,7 +1,7 @@
 {
   description = "Arffornia playtest kit: the `playtest` CLI (up, status, extend, down, checklist, card, guide, report)";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
   outputs = { self, nixpkgs }:
     let
@@ -28,7 +28,7 @@
       });
 
       apps = forAll (pkgs: rec {
-        playtest = { type = "app"; program = "${self.packages.${pkgs.system}.playtest}/bin/playtest"; };
+        playtest = { type = "app"; program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.playtest}/bin/playtest"; };
         default = playtest;
       });
     };

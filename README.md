@@ -50,7 +50,7 @@ A PR URL works too. `playtest help` lists every flag.
 | Slot | Address | Runs | Cap |
 |---|---|---|---|
 | `pr1`, `pr2`, `pr3` | `https://pr<k>.arffornia.com/` | one Website PR: its chart and its `pr-<n>-<sha7>` images, its own seeded Postgres | 768 MiB each |
-| `slot` | `test.arffornia.com:25566` (whitelisted), files on `https://test.arffornia.com/pack/` | the pack: a Provisioning PR, a Mods PR (`pr-<n>` jar), or both. With no file, it runs `main` with the `edge` mod: that is the staging server | 16 GiB |
+| `slot` | `test.arffornia.com:25566` (whitelisted), files on `https://test.arffornia.com/pack/` | the pack: a Provisioning PR, a Mods PR (`pr-<n>` jar), or both; `playtest up main` runs `main` with the `edge` mod. With no file the server is off and uses no memory | 8 GiB |
 
 Launcher PRs have no slot: `playtest up` prints where to download their beta artifact
 (`launcher-pr-<n>`). Fork PRs are never deployed.
@@ -108,8 +108,8 @@ All of it is in [TheGostsniperfr/infra](https://github.com/TheGostsniperfr/infra
 `k8s/config/arffornia/{staging,slot,previews,playtest}`):
 
 - Two Argo CD `ApplicationSet`s read `envs/*.yaml` here (git file generator, public repo, no
-  token): `playtest-website` makes one app per `pr<k>.yaml`, `playtest-pack` keeps the `slot`
-  app on `main` and `edge` unless `slot.yaml` overrides it.
+  token): `playtest-website` makes one app per `pr<k>.yaml`, `playtest-pack` makes the `slot`
+  app only while `slot.yaml` exists, so the test server is off (no memory used) between tests.
 - Their `AppProject` `playtest` allows only the slot namespaces, no cluster-scoped objects, and
   no `VaultSecret`, `NetworkPolicy`, `ResourceQuota`, RBAC or Argo objects.
 - Each slot namespace has a `ResourceQuota` (the hard cap), and Kyverno adds a `LimitRange`

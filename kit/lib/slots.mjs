@@ -28,6 +28,10 @@ const KINDS = {
 };
 export const kindOf = (slug) => KINDS[slug.toLowerCase()] || null;
 
+// `playtest up main`: the test server on Provisioning main with the `edge` mod, no PR. The
+// server only runs while a slot file exists, so this is how to start it for a plain check.
+export const MAIN_REF = 'main';
+
 export function parseRef(ref) {
   const m = /^([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(ref || '') || /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(ref || '');
   if (!m) throw new Error(`expected owner/repo#number or a PR URL, got "${ref}"`);
@@ -84,9 +88,10 @@ export function buildEnv({ slot, prs, requestedBy, now, ttlMs = DEFAULT_TTL_MS }
   const env = {
     slot,
     kind: def.kind,
-    prs: prs.map((p) => p.ref),
-    prsText: prs.map((p) => `${p.repo}#${p.n}`).join(' + '),
+    prs: prs.length ? prs.map((p) => p.ref) : [MAIN_REF],
+    prsText: prs.length ? prs.map((p) => `${p.repo}#${p.n}`).join(' + ') : 'main + edge',
   };
+  if (!prs.length && def.kind !== 'pack') throw new Error(`${slot} needs a PR; only the pack slot runs main`);
   if (def.kind === 'website') {
     const [p] = prs;
     Object.assign(env, { head: p.head, pr: String(p.n), imageTag: `pr-${p.n}-${p.head.slice(0, 7)}` });
@@ -113,7 +118,8 @@ export function validateEnv(file, env, now = Date.now()) {
   const prs = [].concat(env.prs || []);
   if (!prs.length) errs.push('prs is empty');
   const repos = [];
-  for (const p of prs) {
+  const isMain = def.kind === 'pack' && prs.length === 1 && prs[0] === MAIN_REF;
+  for (const p of isMain ? [] : prs) {
     let r;
     try { r = parseRef(p); } catch { errs.push(`bad PR "${p}"`); continue; }
     if (!(ALLOWED[def.kind] || []).includes(r.slug.toLowerCase())) errs.push(`${p}: this repo has no ${def.kind} slot`);

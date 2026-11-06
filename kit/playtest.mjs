@@ -4,6 +4,7 @@
 //   playtest up <pr...> [--slot pr2] [--ttl 24h] [--via-pr] [--no-wait] [--no-open] [--force] [--dry-run]
 //        take a slot for these PRs (website: pr1-pr3.arffornia.com; pack: test.arffornia.com:25566),
 //        wait until it answers, print the URL and the 10-minute checklist
+//   playtest up main [--ttl 24h] [--no-wait]              start the test server on main + edge (no PR)
 //   playtest up <pr> --local [--light|--full] [--dry-run]   the same on this machine (cluster off)
 //   playtest status [--json] [--no-probe]                 slots, who holds them, expiry, health
 //   playtest extend <slot> [24h]                          push the expiry back (7 days at most)
@@ -18,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { SLOTS, PLAYTEST_REPO, ENVS_BRANCH, kindOf, parseRef, parseDuration, buildEnv, validateEnv, pickSlot, extendEnv, serializeEnv, DEFAULT_TTL_MS } from './lib/slots.mjs';
+import { SLOTS, PLAYTEST_REPO, ENVS_BRANCH, kindOf, parseRef, parseDuration, MAIN_REF, buildEnv, validateEnv, pickSlot, extendEnv, serializeEnv, DEFAULT_TTL_MS } from './lib/slots.mjs';
 import { makeGh, makeStore } from './lib/github.mjs';
 import * as health from './lib/health.mjs';
 import { checklistText, buildCard, loadSessions } from './lib/card.mjs';
@@ -49,9 +50,38 @@ const span = (ms) => {
 };
 
 // ------------------------------------------------------------------ up
+// `playtest up main`: start the test server on Provisioning main + the `edge` mod, no PR.
+async function upMain(opts, ctx) {
+  const { store, log } = ctx;
+  const files = store.list();
+  const slot = pickSlot({ kind: 'pack', asked: 'slot', held: heldEnvs(files), prs: [{ ref: MAIN_REF }], now: ctx.now() });
+  const ttlMs = opts.ttl ? parseDuration(opts.ttl) : DEFAULT_TTL_MS;
+  const env = buildEnv({ slot, prs: [], requestedBy: ctx.login(), now: ctx.now(), ttlMs });
+  const errs = validateEnv(`envs/${slot}.yaml`, env, ctx.now());
+  if (errs.length) fail(`refusing to write an invalid env file:\n  - ${errs.join('\n  - ')}`);
+  if (opts['dry-run']) {
+    log(`would write envs/${slot}.yaml on ${PLAYTEST_REPO}@${ENVS_BRANCH}:`);
+    log(serializeEnv(env));
+    return { slot, env, dryRun: true };
+  }
+  const res = store.put(slot, env, files[slot]?.sha || null, `playtest: up ${slot} = main + edge`, { viaPr: !!opts['via-pr'] });
+  if (res.pr) {
+    log(`opened ${res.pr}: merge it (merge commit) to start ${slot}.`);
+    return { slot, env, pr: res.pr };
+  }
+  log(`${slot} = main + edge, until ${env.expires}. The server boots in about 5 to 15 minutes: ${SLOTS[slot].server}`);
+  log(`Stop it when done (frees its memory): playtest down ${slot}`);
+  if (!opts['no-wait']) {
+    const r = await health.waitFor(() => ctx.health.slotUp(slot, env), { timeoutMs: 25 * 60e3, everyMs: ctx.pollMs ?? 15000 });
+    log(r.ok ? `${slot} is up (${r.detail}).` : `${slot} is not answering yet (${r.detail}). Check again with: playtest status`);
+  }
+  return { slot, env };
+}
+
 async function up(refs, opts, ctx) {
   const { gh, store, log } = ctx;
-  if (!refs.length) fail('playtest up needs at least one PR (owner/repo#n)');
+  if (!refs.length) fail('playtest up needs at least one PR (owner/repo#n), or "main" for the test server on main');
+  if (refs.length === 1 && refs[0] === MAIN_REF) return upMain(opts, ctx);
   const prs = refs.map(parseRef);
   if (opts.local) {
     if (prs.length > 1) fail('--local takes one PR');
@@ -162,8 +192,8 @@ async function status(opts, ctx) {
     if (env) {
       const left = Date.parse(env.expires) - ctx.now();
       Object.assign(row, { prs: env.prsText, by: env.requestedBy, expires: env.expires, left: left > 0 ? `${span(left)} left` : `EXPIRED ${span(left)} ago` });
-    } else if (slot === 'slot') row.prs = 'main + edge (staging default)';
-    if (!opts['no-probe'] && (env || slot === 'slot')) row.health = (await ctx.health.slotUp(slot, env || { provisioningRef: 'refs/heads/main', modTag: 'edge' })).detail;
+    } else if (slot === 'slot') row.prs = 'off (start it: playtest up main)';
+    if (!opts['no-probe'] && env) row.health = (await ctx.health.slotUp(slot, env)).detail;
     rows.push(row);
   }
   if (opts.json) { ctx.log(JSON.stringify(rows, null, 2)); return rows; }

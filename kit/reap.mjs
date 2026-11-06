@@ -4,7 +4,7 @@
 // reports. Argo CD then prunes the environment. Nightly sleep (OffhoursSchedule in infra) and
 // the homelab being off stop environments without touching the files.
 import fs from 'node:fs';
-import { parseRef, validateEnv, isExpired } from './lib/slots.mjs';
+import { MAIN_REF, parseRef, validateEnv, isExpired } from './lib/slots.mjs';
 import { makeGh, makeStore } from './lib/github.mjs';
 
 // What to do with each slot file: { slot, reason } for the ones to free.
@@ -16,6 +16,7 @@ export function verdicts(files, gh, now) {
     if (errs.length) { out.push({ slot, sha: f.sha, reason: `invalid: ${errs.join('; ')}` }); continue; }
     if (isExpired(f.env, now)) { out.push({ slot, sha: f.sha, reason: `expired ${f.env.expires}` }); continue; }
     for (const ref of [].concat(f.env.prs)) {
+      if (ref === MAIN_REF) continue;
       const r = parseRef(ref);
       let pr = null;
       try { pr = gh.pr(r); } catch (e) { if (e.status !== 404) throw e; }

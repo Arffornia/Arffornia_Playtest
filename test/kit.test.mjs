@@ -271,7 +271,7 @@ test('status lists every slot with expiry', async () => {
   assert.deepEqual(rows.map((r) => r.slot), ['pr1', 'pr2', 'pr3', 'slot']);
   assert.equal(rows[1].left, '47 h left');
   assert.equal(rows[0].prs, undefined);
-  assert.match(rows[3].prs, /main/);
+  assert.match(rows[3].prs, /^off/);
 });
 
 // ------------------------------------------------------------------ reaper
@@ -291,6 +291,26 @@ test('the reaper frees expired, closed and invalid slots and keeps the rest', as
   assert.deepEqual(res.freed.map((v) => v.slot).sort(), ['pr1', 'pr2', 'slot']);
   assert.match(res.freed.find((v) => v.slot === 'pr2').reason, /merged/);
   assert.deepEqual(Object.keys(fake.branches.envs), ['envs/pr3.yaml']);
+});
+
+test('up main starts the test server on main + edge, and the reaper keeps it until it expires', async () => {
+  const fake = fakeGitHub();
+  const res = await run(['up', 'main', '--ttl', '2h'], ctxFor(fake));
+  assert.equal(res.slot, 'slot');
+  const env = envOf(fake, 'slot');
+  assert.deepEqual(validateEnv('envs/slot.yaml', env, NOW), []);
+  assert.deepEqual([env.provisioningRef, env.modTag, env.prsText], ['refs/heads/main', 'edge', 'main + edge']);
+  const gh = makeGh(fake.transport);
+  assert.equal(reap({ gh, store: makeStore(gh), now: NOW + 3600e3, dryRun: true, log: () => {} }).freed.length, 0);
+  assert.equal(reap({ gh, store: makeStore(gh), now: NOW + 3 * 3600e3, dryRun: true, log: () => {} }).freed.length, 1);
+});
+
+test('up main does not take a slot held by a pack PR', async () => {
+  const fake = fakeGitHub();
+  fake.addPr('Arffornia/Arffornia_Mods', 49);
+  fake.addRelease?.('Arffornia/Arffornia_Mods', 'pr-49', ['arffornia.jar']);
+  await run(['up', 'Arffornia/Arffornia_Mods#49', '--force'], ctxFor(fake));
+  await assert.rejects(run(['up', 'main'], ctxFor(fake)), /held by/);
 });
 
 // ------------------------------------------------------------------ format, card

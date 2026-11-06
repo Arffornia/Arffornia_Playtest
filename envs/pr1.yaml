@@ -1,0 +1,13 @@
+# Written by `playtest up` (https://github.com/Arffornia/Arffornia_Playtest). One file per slot.
+# Argo CD deploys it (TheGostsniperfr/infra, ApplicationSets playtest-*); the reaper removes it
+# when it expires or its PR closes. Change it with `playtest extend|down`, not by hand.
+slot: "pr1"
+kind: "website"
+prs: ["Arffornia/Arffornia_Website#115"]
+prsText: "Arffornia_Website#115"
+head: "f9babfcb6f63a3918657bf5e0ed891eba57f063f"
+pr: "115"
+imageTag: "pr-115-f9babfc"
+requestedBy: "TheGostsniperfr"
+requested: "2026-11-06T21:52:26Z"
+expires: "2026-11-08T21:52:26Z"

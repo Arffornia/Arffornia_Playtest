@@ -64,20 +64,24 @@ function sha1(data) {
 
 // Recomputes the hash of every rewritten file listed in an index. `fetchText(path)` returns the
 // upstream text of `storage/<path>`, or null. Returns the paths whose hash changed.
+// njs loses block-scoped loop variables across `await` (the rules came back null, so staging
+// served the upstream hash for a rewritten file): every await sits in a function of its own.
+async function rehashFile(entry, rules, fetchText) {
+    const text = await fetchText(entry.path);
+    if (text === null) return false;
+    const out = rewriteText(text, rules);
+    if (!out.changed) return false;
+    entry.hash = sha1(out.text);
+    return true;
+}
+
 async function rehashIndex(index, profile, kind, fetchText) {
-    const changed = [];
     const files = (index && index.files) || [];
-    for (let i = 0; i < files.length; i++) {
-        const rules = rulesFor(profile, kind, files[i].path);
-        if (!rules) continue;
-        const text = await fetchText(files[i].path);
-        if (text === null) continue;
-        const out = rewriteText(text, rules);
-        if (!out.changed) continue;
-        files[i].hash = sha1(out.text);
-        changed.push(files[i].path);
-    }
-    return changed;
+    const targets = files
+        .map((entry) => ({ entry: entry, rules: rulesFor(profile, kind, entry.path) }))
+        .filter((t) => t.rules);
+    const results = await Promise.all(targets.map((t) => rehashFile(t.entry, t.rules, fetchText)));
+    return targets.filter((t, k) => results[k]).map((t) => t.entry.path);
 }
 
 // ------------------------------------------------------------------ nginx handlers
